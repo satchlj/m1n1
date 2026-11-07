@@ -205,6 +205,8 @@ static bool enable_tso = false;
  * then hands no graphics over (kboot_set_config_lost()). Everything else boots as before.
  */
 static bool config_lost = false;
+static bool config_lost_local = false;
+static bool config_lost_upstream = false;
 static bool config_seen = false;
 static bool config_lost_passed = false;
 
@@ -224,8 +226,10 @@ static bool config_line(const char *s)
 /* check_var() cannot read this line: lost if it is one of m1n1's */
 static bool config_unreadable(u8 *p)
 {
-    if (config_line((char *)p))
+    if (config_line((char *)p)) {
         config_lost = true;
+        config_lost_local = true;
+    }
     return false;
 }
 
@@ -235,9 +239,13 @@ static bool check_var(u8 **p)
     if (!val)
         return config_unreadable(*p);
     /* A line without '=' took the lines after it into this name */
-    for (char *nl = memchr(*p, '\n', val - (char *)*p); nl; nl = memchr(nl + 1, '\n', val - nl - 1))
-        if (config_line(nl + 1))
+    for (char *nl = memchr(*p, '\n', val - (char *)*p); nl;
+         nl = memchr(nl + 1, '\n', val - nl - 1)) {
+        if (config_line(nl + 1)) {
             config_lost = true;
+            config_lost_local = true;
+        }
+    }
 
     val++;
 
@@ -253,12 +261,14 @@ static bool check_var(u8 **p)
             printf("Too many chosen vars, ignoring %.*s\n", (int)(val - (char *)*p - 1),
                    (char *)*p);
             config_lost = true;
+            config_lost_local = true;
         } else {
             chosen[chosen_cnt++] = (char *)*p;
         }
     } else if (IS_VAR("m1n1.config-lost=")) {
         /* Any value: an earlier stage lost a line, and nothing after it can take that back */
         config_lost = true;
+        config_lost_upstream = true;
     } else if (IS_VAR("chainload=")) {
         chainload_spec = val;
     } else if (IS_VAR("boot=")) {
@@ -330,6 +340,8 @@ static void *load_one_payload(void *start, size_t size)
         /* After the kernel or a config line, more config may follow (update-m1n1 puts it last) */
         if (kernel || config_seen)
             config_lost = true;
+        if (kernel || config_seen)
+            config_lost_local = true;
         printf("Unknown payload at %p (magic: %02x%02x%02x%02x)\n", p, p[0], p[1], p[2], p[3]);
         return NULL;
     }
@@ -506,8 +518,12 @@ int payload_run(void)
                 printf("Failed to kboot set %s\n", var + 7);
         }
 
-        if (config_lost)
-            kboot_set_config_lost();
+        if (config_lost) {
+            if (config_lost_upstream && !config_lost_local)
+                kboot_set_config_lost_upstream();
+            else
+                kboot_set_config_lost();
+        }
         if (kboot_prepare_dt(fdt)) {
             printf("Failed to prepare FDT!\n");
             goto boot_failed;

@@ -93,6 +93,7 @@ typedef uint64_t u64;
 #define BUILD_TAG "host-test"
 #define ARRAY_SIZE(s) (sizeof(s) / sizeof((s)[0]))
 #define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((a) - 1))
+#define SZ_16K 0x4000
 ''' + between(header, "struct kernel_header {", "void kboot_set_initrd(") + r'''
 enum { V26_6_2 = 1 };
 static struct { int version; } os_firmware = {V26_6_2};
@@ -124,14 +125,17 @@ static void *test_calloc(size_t n, size_t size)
 static char *chosen_params[MAX_CHOSEN_PARAMS][2];
 static bool chosen_is_default[MAX_CHOSEN_PARAMS];
 static bool chosen_lost;
+static bool chosen_lost_upstream_only;
 static unsigned char blob[1 << 16];
 static void *dt = blob;
 void kboot_delete_chosen(const char *name);
 ''' + function(kboot, "int kboot_set_chosen(const char *name, const char *value)\n{") + \
         function(kboot, "void kboot_delete_chosen(const char *name)\n{") + \
         optional(kboot, "void kboot_set_config_lost(void)\n{") + \
+        optional(kboot, "void kboot_set_config_lost_upstream(void)\n{") + \
         between(kboot, "struct m3_default_board {", "/* The config value of chosen.") + \
         function(kboot, "static const char *kboot_chosen_param(const char *name)\n{") + \
+        function(kboot, "static bool dt_aura_j613_recipe_after_upstream_loss(") + \
         function(kboot, "static void dt_drop_m3_defaults(void)\n{") + \
         optional(kboot, "static void dt_drop_m3_graphics(") + \
         function(kboot, "static int dt_set_m3_defaults(void)\n{") + r'''
@@ -664,6 +668,41 @@ def test_stage_1_loss_survives_a_stage_2_owner_marker_line(tools):
     forwarded = stage1(tools, b"chosen.asahi,t8122-gpu=0" + b"x" * 1025 + b"\n")
     assert forwarded.endswith(LOST)
     graphics_off(boot(tools, "stage2", GPU_ON + b"m1n1.config-lost=0\n", trailer=forwarded))
+
+
+def aura_loss(version=b"1.0.0b5", log=b"0x103de6d8000"):
+    return (b"chosen.asahi,m1n1-stage1-version=" + version + b"\n" +
+            b"chosen.aurora,stage1-log=" + log + b"\n" + LOST)
+
+
+@pytest.mark.parametrize("build", STAGE2)
+def test_exact_aura_j613_recipe_survives_an_upstream_only_loss(tools, build):
+    owner = b"chosen.asahi,j613-25g83-dcpext=1\n"
+    b = boot(tools, build, owner, trailer=aura_loss())
+    booted(b)
+    assert set(AIR) <= b.armed and b.select == "g15-standin"
+    assert b.chosen["asahi,j613-25g83-dcpext"] == "1"
+    assert "exact Aura upstream-loss recipe accepted" in b.stdout
+
+
+@pytest.mark.parametrize("owner,trailer", [
+    (b"chosen.asahi,j613-25g83-dcpext=1\n", aura_loss(version=b"1.0.0b6")),
+    (b"chosen.asahi,j613-25g83-dcpext=1\n", aura_loss(log=b"0x103de6d8001")),
+    (b"", aura_loss()),
+    (b"chosen.asahi,j613-25g83-dcpext=1\nchosen.asahi,t8122-gpu=0\n", aura_loss()),
+    (b"chosen.asahi,j613-25g83-dcpext=1\nchosen.asahi,m3-defaults=0\n", aura_loss()),
+    (b"chosen.asahi,j613-25g83-dcpext=1\nchosen.test,readable=1\n\x01\x02\x03\x04", aura_loss()),
+], ids=["other-aura", "unaligned-log", "no-explicit-recipe", "gpu-off", "master-off",
+        "local-and-upstream-loss"])
+@pytest.mark.parametrize("build", STAGE2)
+def test_aura_loss_exception_rejects_every_nonexact_context(tools, build, owner, trailer):
+    graphics_off(boot(tools, build, owner, trailer=trailer))
+
+
+@pytest.mark.parametrize("build", STAGE2)
+def test_aura_loss_exception_is_j613_only(tools, build):
+    owner = b"chosen.asahi,j613-25g83-dcpext=1\n"
+    graphics_off(boot(tools, build, owner, board="j615", trailer=aura_loss()), board="j615")
 
 
 def test_a_clean_stage_1_hands_over_its_lines_only(tools):

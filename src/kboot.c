@@ -63,6 +63,8 @@ static bool chosen_is_default[MAX_CHOSEN_PARAMS];
  * (kboot_set_config_lost()). An owner's chosen.<switch>=0 may be among the lost.
  */
 static bool chosen_lost;
+/* True only when an earlier stage supplied the loss marker and this stage lost no line itself. */
+static bool chosen_lost_upstream_only;
 static char *uboot_config[MAX_UBOOT_CONFIGS][2];
 
 extern const char *const m1n1_version;
@@ -433,6 +435,52 @@ static const char *kboot_chosen_param(const char *name)
 }
 
 /*
+ * Aura 1.0.0b5's Mach-O stage 1 can report a scan loss after it has loaded a complete ESP
+ * stage 2. Admit the installed J613 recipe only when this stage read its own explicit native26
+ * external-display request, Aura's exact version and its stage-1 log pointer, and no setting
+ * contradicts the four-switch Air recipe. A local scan/allocation loss remains fail-closed.
+ */
+static bool dt_aura_j613_recipe_after_upstream_loss(const char *board,
+                                                    const struct m3_default_board *e)
+{
+    if (!chosen_lost_upstream_only || strcmp(board, "apple,j613") || !e->rest_need_first)
+        return false;
+
+    const char *version = kboot_chosen_param("asahi,m1n1-stage1-version");
+    const char *log = kboot_chosen_param("aurora,stage1-log");
+    const char *ext = kboot_chosen_param("asahi,j613-25g83-dcpext");
+    const char *all = kboot_chosen_param(M3_DEFAULTS_SWITCH);
+    if (!version || strcmp(version, "1.0.0b5") || !ext || strcmp(ext, "1") ||
+        (all && strcmp(all, "1")) || !log || log[0] != '0' || log[1] != 'x')
+        return false;
+
+    u64 log_addr = 0;
+    for (const char *p = log + 2; *p; p++) {
+        unsigned digit;
+        if (*p >= '0' && *p <= '9')
+            digit = *p - '0';
+        else if (*p >= 'a' && *p <= 'f')
+            digit = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F')
+            digit = *p - 'A' + 10;
+        else
+            return false;
+        if (log_addr > (UINT64_MAX - digit) / 16)
+            return false;
+        log_addr = log_addr * 16 + digit;
+    }
+    if (!log_addr || (log_addr & (SZ_16K - 1)))
+        return false;
+
+    for (const char *const *sw = e->switches; *sw; sw++) {
+        const char *value = kboot_chosen_param(*sw);
+        if (value && strcmp(value, "1"))
+            return false;
+    }
+    return true;
+}
+
+/*
  * A later preparation (the proxy can prepare again, with another device tree or after changing
  * the config) first removes the defaults an earlier one added, so an earlier default never
  * answers for a later config or board. An owner's later value for a switch clears its flag and
@@ -481,13 +529,17 @@ static int dt_set_m3_defaults(void)
         if (!board)
             continue;
 
-        if (chosen_lost) {
+        if (chosen_lost && !dt_aura_j613_recipe_after_upstream_loss(board, e)) {
             dt_drop_m3_graphics(e);
             printf("kboot: %s: a config line was lost, so an owner's =0 may be missing: no "
                    "graphics handoff\n",
                    board);
             return 0;
         }
+        if (chosen_lost)
+            printf("kboot: %s: exact Aura upstream-loss recipe accepted; local losses still "
+                   "fail closed\n",
+                   board);
         const char *all = kboot_chosen_param(M3_DEFAULTS_SWITCH);
         if (all && strcmp(all, "1")) {
             printf("kboot: %s: graphics defaults off (chosen.%s=%s)\n", board, M3_DEFAULTS_SWITCH,
@@ -6554,6 +6606,7 @@ int kboot_set_chosen(const char *name, const char *value)
 
     if (!name) {
         chosen_lost = true;
+        chosen_lost_upstream_only = false;
         return -1;
     }
     /* The new value first: a failure leaves an existing entry (an owner's =0) as it was */
@@ -6561,6 +6614,7 @@ int kboot_set_chosen(const char *name, const char *value)
         copy = calloc(strlen(value) + 1, 1);
         if (!copy) {
             chosen_lost = true;
+            chosen_lost_upstream_only = false;
             return -1;
         }
         strcpy(copy, value);
@@ -6572,6 +6626,7 @@ int kboot_set_chosen(const char *name, const char *value)
             if (!chosen_params[i][0]) {
                 free(copy);
                 chosen_lost = true;
+                chosen_lost_upstream_only = false;
                 return -1;
             }
             strcpy(chosen_params[i][0], name);
@@ -6585,6 +6640,7 @@ int kboot_set_chosen(const char *name, const char *value)
     if (i >= MAX_CHOSEN_PARAMS) {
         free(copy);
         chosen_lost = true;
+        chosen_lost_upstream_only = false;
         return -1;
     }
 
@@ -6596,6 +6652,15 @@ int kboot_set_chosen(const char *name, const char *value)
 
 void kboot_set_config_lost(void)
 {
+    chosen_lost = true;
+    chosen_lost_upstream_only = false;
+}
+
+void kboot_set_config_lost_upstream(void)
+{
+    /* A kboot_set_chosen() failure already made this a local loss; never weaken that. */
+    if (!chosen_lost)
+        chosen_lost_upstream_only = true;
     chosen_lost = true;
 }
 

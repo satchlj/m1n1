@@ -18,6 +18,7 @@ def harness():
     source = (ROOT / "src/kboot.c").read_text()
     tables = between(source, "struct m3_default_board {", '#define M3_DEFAULTS_SWITCH "asahi,m3-defaults"\n')
     lookup = between(source, "static const char *kboot_chosen_param(const char *name)\n{", "\n}\n")
+    aura_loss = between(source, "static bool dt_aura_j613_recipe_after_upstream_loss(", "\n}\n")
     drop = between(source, "static void dt_drop_m3_defaults(void)\n{", "\n}\n")
     drop_graphics = between(source, "static void dt_drop_m3_graphics(", "\n}\n")
     setter = between(source, "int kboot_set_chosen(const char *name, const char *value)\n{", "\n}\n")
@@ -25,14 +26,18 @@ def harness():
     return (r'''
 #include <assert.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "libfdt.h"
 #define MAX_CHOSEN_PARAMS 16
+#define SZ_16K 0x4000
+typedef uint64_t u64;
 static char *chosen_params[MAX_CHOSEN_PARAMS][2];
 static bool chosen_is_default[MAX_CHOSEN_PARAMS];
 static bool chosen_lost;
+static bool chosen_lost_upstream_only;
 static unsigned char blob[16384];
 static void *dt = blob;
 /* allocation fault injection: the n-th calloc from here on fails */
@@ -45,7 +50,7 @@ static void *test_calloc(size_t n, size_t size)
 }
 #define calloc test_calloc
 void kboot_delete_chosen(const char *name);
-''' + setter + "\n" + deleter + "\n" + tables + lookup + "\n" + drop + "\n" + drop_graphics + "\n" +
+''' + setter + "\n" + deleter + "\n" + tables + lookup + "\n" + aura_loss + "\n" + drop + "\n" + drop_graphics + "\n" +
         definition(source, "dt_set_m3_defaults") + r'''
 /* the same write as dt_set_chosen(): value plus its NUL */
 static void write_chosen(void)
@@ -67,6 +72,7 @@ static void reset(const char *compat, int compat_len)
 {
     dt_drop_m3_defaults();
     chosen_lost = false;     /* a new boot */
+    chosen_lost_upstream_only = false;
     for (int i = 0; i < MAX_CHOSEN_PARAMS; i++) {
         free(chosen_params[i][0]); free(chosen_params[i][1]);
         chosen_params[i][0] = chosen_params[i][1] = NULL;
@@ -630,6 +636,7 @@ def test_the_defaults_path_only_edits_the_chosen_table():
     compatible and edit the chosen table"""
     source = (ROOT / "src/kboot.c").read_text()
     allowed = {"dt_drop_m3_defaults", "dt_drop_m3_graphics", "kboot_chosen_param",
+               "dt_aura_j613_recipe_after_upstream_loss",
                "kboot_set_chosen", "kboot_delete_chosen", "fdt_node_check_compatible", "printf",
                "strcmp", "strncmp", "strlen", "sizeof", "while", "for", "if"}
     for name, signature in (("dt_set_m3_defaults", "static int dt_set_m3_defaults(void)\n{"),

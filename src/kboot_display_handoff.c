@@ -222,6 +222,7 @@ struct dcp_soc {
     bool board_gate;    /* nothing at all unless chip_id is .chip and the root is one of .boards */
     bool any_uuid;      /* no image pinned: the running image's ADT uuid is published */
     bool log_streams;   /* log the DART stream registers, without the ADT description */
+    bool oslog_in_rsv;  /* an __OS_LOG wholly inside a /memreserve/ is still described */
     const char *uuid;   /* DCP firmware image; NULL: none pinned, dry run only (unless any_uuid) */
     u32 os_fw;          /* enum fw_version the kernel's DCP interface is written for */
     const char *os_fw_name;
@@ -314,6 +315,7 @@ static const struct dcp_soc dcp_soc_j613_25g83 = {
     .describe = true,
     .adt_psreg = true,
     .fw25 = true,
+    .oslog_in_rsv = true,
     .uuid = "C042E95C-B9D8-3F0E-94B3-582A08AA6FDD",
     .os_fw = V26_6_2,
     .os_fw_name = "26.6.2",
@@ -574,6 +576,40 @@ static int dcp6_resv_conflict(void *dt, u64 base, u64 size, const char *what)
     return 0;
 }
 
+/*
+ * As dcp6_resv_conflict(), except that the exact 25G83 profile may describe an __OS_LOG buffer
+ * already protected by a containing /memreserve/. A partial overlap still fails, and the normal
+ * /reserved-memory and carveout checks remain in force.
+ */
+static void *dcp6_scratch(void *dt);
+
+static int dcp6_oslog_conflict(void *dt, u64 base, u64 size)
+{
+    if (!dcp6.soc->oslog_in_rsv)
+        return dcp6_resv_conflict(dt, base, size, "__OS_LOG");
+    if (!size || base + size < base)
+        bail("__OS_LOG 0x%lx+0x%lx has an invalid extent\n", base, size);
+
+    int n = fdt_num_mem_rsv(dt);
+    for (int i = 0; i < n; i++) {
+        u64 a, s;
+        if (fdt_get_mem_rsv(dt, i, &a, &s) || !dcp6_overlaps(base, size, a, s))
+            continue;
+        if (base < a || base + size < base || a + s < a || base + size > a + s)
+            bail("__OS_LOG 0x%lx+0x%lx straddles /memreserve/ 0x%lx+0x%lx\n", base, size, a, s);
+        dlog("__OS_LOG 0x%lx+0x%lx lies inside /memreserve/ 0x%lx+0x%lx\n", base, size, a, s);
+    }
+
+    void *copy = dcp6_scratch(dt);
+    if (!copy)
+        return -1;
+    while (fdt_num_mem_rsv(copy) > 0)
+        fdt_del_mem_rsv(copy, 0);
+    int ret = dcp6_resv_conflict(copy, base, size, "__OS_LOG");
+    free(copy);
+    return ret;
+}
+
 static int dcp6_carveout_conflict(u64 base, u64 size, const char *what)
 {
     for (size_t j = 0; j < mcc_carveout_count; j++)
@@ -802,7 +838,7 @@ static __attribute__((noinline)) void dcp6_reserve_oslogs(void *dt)
                 dlog("%s: __OS_LOG overlaps %s's\n", dcp6.nubs[i], dcp6.nubs[j]);
                 bad = true;
             }
-        if (bad || dcp6_resv_conflict(dt, logs[i].phys, logs[i].size, "__OS_LOG") ||
+        if (bad || dcp6_oslog_conflict(dt, logs[i].phys, logs[i].size) ||
             dcp6_carveout_conflict(logs[i].phys, logs[i].size, "__OS_LOG"))
             continue;
         logs[i].add = true;
