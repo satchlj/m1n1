@@ -675,10 +675,12 @@ def aura_loss(version=b"1.0.0b5", log=b"0x103de6d8000"):
             b"chosen.aurora,stage1-log=" + log + b"\n" + LOST)
 
 
+@pytest.mark.parametrize("version", [b"1.0.0b5", b"1.0.0b5-hsusb1"],
+                         ids=["original", "hsusb1"])
 @pytest.mark.parametrize("build", STAGE2)
-def test_exact_aura_j613_recipe_survives_an_upstream_only_loss(tools, build):
+def test_exact_aura_j613_recipe_survives_an_upstream_only_loss(tools, build, version):
     owner = b"chosen.asahi,j613-25g83-dcpext=1\n"
-    b = boot(tools, build, owner, trailer=aura_loss())
+    b = boot(tools, build, owner, trailer=aura_loss(version=version))
     booted(b)
     assert set(AIR) <= b.armed and b.select == "g15-standin"
     assert b.chosen["asahi,j613-25g83-dcpext"] == "1"

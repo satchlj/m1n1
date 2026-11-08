@@ -435,10 +435,11 @@ static const char *kboot_chosen_param(const char *name)
 }
 
 /*
- * Aura 1.0.0b5's Mach-O stage 1 can report a scan loss after it has loaded a complete ESP
- * stage 2. Admit the installed J613 recipe only when this stage read its own explicit native26
- * external-display request, Aura's exact version and its stage-1 log pointer, and no setting
- * contradicts the four-switch Air recipe. A local scan/allocation loss remains fail-closed.
+ * Aura 1.0.0b5's Mach-O stage 1 and its HS-USB-only 1.0.0b5-hsusb1 successor can report a scan
+ * loss after they have loaded a complete ESP stage 2. Admit the installed J613 recipe only when
+ * this stage read its own explicit native26 external-display request, one of those two exact
+ * Aura versions and its stage-1 log pointer, and no setting contradicts the four-switch Air
+ * recipe. A local scan/allocation loss remains fail-closed.
  */
 static bool dt_aura_j613_recipe_after_upstream_loss(const char *board,
                                                     const struct m3_default_board *e)
@@ -450,7 +451,9 @@ static bool dt_aura_j613_recipe_after_upstream_loss(const char *board,
     const char *log = kboot_chosen_param("aurora,stage1-log");
     const char *ext = kboot_chosen_param("asahi,j613-25g83-dcpext");
     const char *all = kboot_chosen_param(M3_DEFAULTS_SWITCH);
-    if (!version || strcmp(version, "1.0.0b5") || !ext || strcmp(ext, "1") ||
+    bool version_ok = version && (!strcmp(version, "1.0.0b5") ||
+                                  !strcmp(version, "1.0.0b5-hsusb1"));
+    if (!version_ok || !ext || strcmp(ext, "1") ||
         (all && strcmp(all, "1")) || !log || log[0] != '0' || log[1] != 'x')
         return false;
 
